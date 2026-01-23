@@ -29,6 +29,7 @@ dependencies = [
     "pyyaml",
     "datasets",
     "huggingface-hub>=0.20.0",
+    "braindecode>=0.8.0",
 ]
 
 [project.optional-dependencies]
