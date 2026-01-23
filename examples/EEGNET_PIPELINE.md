@@ -133,9 +133,9 @@ label = classes_[prediction]        # → actual label (0, 120, 224, ...)
 |--------|-----------|
 | **Depthwise separable convolutions** | Much fewer parameters than standard convolutions |
 | **Small model size** | ~10-50KB total, well under 25MB limit |
-| **Fast inference** | <1ms per sample for real-time BCI |
+| **Fast inference** | <1ms per sample for real-time BCI (not sure about this one - will need to confirm!)|
 | **128ms context window** | Balances temporal context vs latency |
-| **PCA projection** | Efficient dimensionality reduction that preserves signal variance |
+| **PCA projection** | Efficient dimensionality reduction that preserves signal variance (this is actually kind of slow right now) |
 
 ## Usage
 

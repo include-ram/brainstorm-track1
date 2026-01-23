@@ -30,6 +30,50 @@ _REPO_ROOT = Path(__file__).parent.parent.parent
 MODEL_PATH = _REPO_ROOT / "model.pt"
 
 
+class SlidingWindowDataset(torch.utils.data.Dataset):
+    """Memory-efficient dataset that creates windows on-the-fly."""
+
+    def __init__(
+        self,
+        X: np.ndarray,
+        y: np.ndarray,
+        window_size: int,
+        class_to_idx: dict,
+    ):
+        """
+        Args:
+            X: Features of shape (n_samples, n_channels).
+            y: Labels of shape (n_samples,).
+            window_size: Number of timesteps per window.
+            class_to_idx: Mapping from class labels to indices.
+        """
+        self.X = X
+        self.y = y
+        self.window_size = window_size
+        self.class_to_idx = class_to_idx
+        self.n_windows = len(X) - window_size
+
+    def __len__(self) -> int:
+        return self.n_windows
+
+    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
+        # Get window starting at idx
+        start = idx
+        end = idx + self.window_size
+        window = self.X[start:end]  # (window_size, n_channels)
+
+        # Reshape to (1, n_channels, window_size) for Conv2d
+        window = window.T[np.newaxis, :, :]  # (1, n_channels, window_size)
+
+        # Label is for the last sample in the window
+        label_idx = self.class_to_idx[self.y[end - 1]]
+
+        return (
+            torch.tensor(window, dtype=torch.float32),
+            torch.tensor(label_idx, dtype=torch.long),
+        )
+
+
 class EEGNetCore(nn.Module):
     """
     Core EEGNet architecture with depthwise separable convolutions.
@@ -174,22 +218,25 @@ class EEGNet(BaseModel):
         F1: int = 8,
         D: int = 2,
         dropout: float = 0.25,
+        use_pca: bool = True,
     ) -> None:
         """
         Initialize EEGNet model.
 
         Args:
             input_size: Number of input channels from ECoG array.
-            projected_channels: Number of channels after PCA projection.
+            projected_channels: Number of channels after PCA projection (ignored if use_pca=False).
             window_size: Number of time samples for temporal context.
             F1: Number of temporal filters.
             D: Depthwise multiplier.
             dropout: Dropout rate.
+            use_pca: Whether to use PCA for channel reduction. If False, uses all input channels.
         """
         super().__init__()
 
         self.input_size = input_size
-        self.projected_channels = projected_channels
+        self.use_pca = use_pca
+        self.projected_channels = projected_channels if use_pca else input_size
         self.window_size = window_size
         self.F1 = F1
         self.D = D
@@ -198,7 +245,7 @@ class EEGNet(BaseModel):
         self.classes_: np.ndarray | None = None
         self._n_classes: int | None = None
 
-        # PCA projection (fitted during training)
+        # PCA projection (fitted during training, only if use_pca=True)
         self.pca: PCAProjection | None = None
         self.pca_layer: nn.Linear | None = None
 
@@ -293,32 +340,26 @@ class EEGNet(BaseModel):
         class_to_idx = {c: i for i, c in enumerate(self.classes_)}
 
         logger.info(f"Training EEGNet with {n_classes} classes: {self.classes_.tolist()}")
-        logger.info(f"Fitting PCA projection: {self.input_size} -> {self.projected_channels} channels")
 
-        # Fit PCA on training data
-        self.pca = PCAProjection(n_components=self.projected_channels)
-        X_projected = self.pca.fit_transform(X)
-        self.pca_layer = self.pca.get_torch_projection()
+        # Apply PCA if enabled
+        if self.use_pca:
+            logger.info(f"Fitting PCA projection: {self.input_size} -> {self.projected_channels} channels")
+            self.pca = PCAProjection(n_components=self.projected_channels)
+            X_projected = self.pca.fit_transform(X)
+            self.pca_layer = self.pca.get_torch_projection()
+        else:
+            logger.info(f"Using all {self.input_size} channels (no PCA)")
+            X_projected = X
 
         # Build EEGNet
         self._build_network(n_classes)
 
-        # Create windowed samples for training
-        logger.info(f"Creating windowed training data with window_size={self.window_size}")
-        X_windows, y_windows = self._create_windowed_data(X_projected, y)
+        # Create memory-efficient sliding window dataset
+        logger.info(f"Creating sliding window dataset with window_size={self.window_size}")
+        n_windows = len(X_projected) - self.window_size
+        logger.info(f"Training data: {n_windows} windows")
 
-        logger.info(f"Training data: {X_windows.shape[0]} windows")
-
-        # Convert to tensors
-        X_tensor = torch.tensor(X_windows, dtype=torch.float32)
-        # Reshape to (batch, 1, channels, time)
-        X_tensor = X_tensor.permute(0, 2, 1).unsqueeze(1)
-
-        y_indices = np.array([class_to_idx[label] for label in y_windows])
-        y_tensor = torch.tensor(y_indices, dtype=torch.long)
-
-        # Create data loader
-        dataset = torch.utils.data.TensorDataset(X_tensor, y_tensor)
+        dataset = SlidingWindowDataset(X_projected, y, self.window_size, class_to_idx)
         loader = torch.utils.data.DataLoader(
             dataset, batch_size=batch_size, shuffle=True, num_workers=0
         )
@@ -327,16 +368,14 @@ class EEGNet(BaseModel):
         val_loader = None
         if X_val is not None and y_val is not None:
             logger.info("Preparing validation data...")
-            X_val_projected = self.pca.transform(X_val)
-            X_val_windows, y_val_windows = self._create_windowed_data(X_val_projected, y_val)
-            logger.info(f"Validation data: {X_val_windows.shape[0]} windows")
+            if self.use_pca:
+                X_val_projected = self.pca.transform(X_val)
+            else:
+                X_val_projected = X_val
+            n_val_windows = len(X_val_projected) - self.window_size
+            logger.info(f"Validation data: {n_val_windows} windows")
 
-            X_val_tensor = torch.tensor(X_val_windows, dtype=torch.float32)
-            X_val_tensor = X_val_tensor.permute(0, 2, 1).unsqueeze(1)
-            y_val_indices = np.array([class_to_idx[label] for label in y_val_windows])
-            y_val_tensor = torch.tensor(y_val_indices, dtype=torch.long)
-
-            val_dataset = torch.utils.data.TensorDataset(X_val_tensor, y_val_tensor)
+            val_dataset = SlidingWindowDataset(X_val_projected, y_val, self.window_size, class_to_idx)
             val_loader = torch.utils.data.DataLoader(
                 val_dataset, batch_size=batch_size, shuffle=False, num_workers=0
             )
@@ -353,8 +392,10 @@ class EEGNet(BaseModel):
         self.to(device)
 
         # Compute class weights for imbalanced data
-        class_counts = np.bincount(y_indices)
-        class_weights = 1.0 / class_counts
+        # Convert labels to indices for counting
+        y_indices_for_weights = np.array([class_to_idx[label] for label in y[self.window_size:]])
+        class_counts = np.bincount(y_indices_for_weights, minlength=n_classes)
+        class_weights = 1.0 / np.maximum(class_counts, 1)  # Avoid division by zero
         class_weights = class_weights / class_weights.sum() * n_classes  # Normalize
         class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32).to(device)
         logger.info(f"Class weights: {class_weights.round(2).tolist()}")
@@ -434,14 +475,17 @@ class EEGNet(BaseModel):
                             "F1": self.F1,
                             "D": self.D,
                             "dropout": self.dropout_rate,
+                            "use_pca": self.use_pca,
                         },
                         "classes": self.classes_,
-                        "pca_mean": self.pca.mean_,
-                        "pca_components": self.pca.components_,
                         "eegnet_state_dict": self.eegnet.state_dict(),
                         "epoch": epoch + 1,
                         "val_bal_acc": val_bal_acc,
                     }
+                    # Only save PCA if used
+                    if self.use_pca:
+                        checkpoint["pca_mean"] = self.pca.mean_
+                        checkpoint["pca_components"] = self.pca.components_
                     torch.save(checkpoint, best_checkpoint_path)
                     logger.info(f"Epoch {epoch+1}/{epochs} - Loss: {avg_loss:.4f} - Val Balanced Acc: {val_bal_acc:.4f} [BEST - saved to {best_checkpoint_path}]")
                 else:
@@ -493,14 +537,19 @@ class EEGNet(BaseModel):
         Returns:
             Predicted label as an integer.
         """
-        if self.classes_ is None or self.pca_layer is None or self.eegnet is None:
+        if self.classes_ is None or self.eegnet is None:
+            raise RuntimeError("Model not trained. Call fit() or load a trained model.")
+        if self.use_pca and self.pca_layer is None:
             raise RuntimeError("Model not trained. Call fit() or load a trained model.")
 
         self.eval()
         with torch.no_grad():
-            # Project input channels
-            x_tensor = torch.tensor(X, dtype=torch.float32).unsqueeze(0)
-            x_projected = self.pca_layer(x_tensor).squeeze(0).numpy()
+            # Project input channels (if using PCA)
+            if self.use_pca:
+                x_tensor = torch.tensor(X, dtype=torch.float32).unsqueeze(0)
+                x_projected = self.pca_layer(x_tensor).squeeze(0).numpy()
+            else:
+                x_projected = X
 
             # Update sliding window buffer
             window = self._update_buffer(x_projected)
@@ -522,7 +571,9 @@ class EEGNet(BaseModel):
         Returns:
             Path to the saved model file.
         """
-        if self.classes_ is None or self.pca is None or self.eegnet is None:
+        if self.classes_ is None or self.eegnet is None:
+            raise RuntimeError("Cannot save untrained model. Call fit() first.")
+        if self.use_pca and self.pca is None:
             raise RuntimeError("Cannot save untrained model. Call fit() first.")
 
         checkpoint = {
@@ -534,12 +585,16 @@ class EEGNet(BaseModel):
                 "F1": self.F1,
                 "D": self.D,
                 "dropout": self.dropout_rate,
+                "use_pca": self.use_pca,
             },
             "classes": self.classes_,
-            "pca_mean": self.pca.mean_,
-            "pca_components": self.pca.components_,
             "eegnet_state_dict": self.eegnet.state_dict(),
         }
+
+        # Only save PCA if used
+        if self.use_pca:
+            checkpoint["pca_mean"] = self.pca.mean_
+            checkpoint["pca_components"] = self.pca.components_
 
         torch.save(checkpoint, MODEL_PATH)
         logger.debug(f"EEGNet model saved to {MODEL_PATH}")
@@ -562,6 +617,8 @@ class EEGNet(BaseModel):
         checkpoint = torch.load(MODEL_PATH, weights_only=False)
 
         config = checkpoint["config"]
+        use_pca = config.get("use_pca", True)  # Default to True for backwards compatibility
+
         model = cls(
             input_size=config["input_size"],
             projected_channels=config["projected_channels"],
@@ -569,14 +626,16 @@ class EEGNet(BaseModel):
             F1=config["F1"],
             D=config["D"],
             dropout=config["dropout"],
+            use_pca=use_pca,
         )
 
-        # Restore PCA projection
-        model.pca = PCAProjection(n_components=config["projected_channels"])
-        model.pca.mean_ = checkpoint["pca_mean"]
-        model.pca.components_ = checkpoint["pca_components"]
-        model.pca.pca = True  # Mark as fitted
-        model.pca_layer = model.pca.get_torch_projection()
+        # Restore PCA projection if used
+        if use_pca:
+            model.pca = PCAProjection(n_components=config["projected_channels"])
+            model.pca.mean_ = checkpoint["pca_mean"]
+            model.pca.components_ = checkpoint["pca_components"]
+            model.pca.pca = True  # Mark as fitted
+            model.pca_layer = model.pca.get_torch_projection()
 
         # Restore classes and network
         model.classes_ = checkpoint["classes"]
