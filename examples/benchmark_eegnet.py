@@ -87,25 +87,41 @@ def load_eegnet_from_checkpoint(checkpoint_path: Path) -> tuple[EEGNet, dict, di
     return model, config, checkpoint
 
 
-def measure_latency(
-    model: EEGNet, sample: np.ndarray, n_warmup: int = 50, n_runs: int = 200
-) -> float:
-    """Measure inference latency in milliseconds (CPU)."""
+def measure_latency_and_accuracy(
+    model: EEGNet, X: np.ndarray, y: np.ndarray | None = None
+) -> tuple[float, float | None]:
+    """
+    Measure inference latency and optionally balanced accuracy.
+
+    Args:
+        model: EEGNet model
+        X: Input features (n_samples, n_channels)
+        y: Optional labels for accuracy calculation
+
+    Returns:
+        Tuple of (latency_ms, balanced_accuracy or None)
+    """
+    from sklearn.metrics import balanced_accuracy_score
+
     model.eval()
+    model._init_window_buffer()  # Reset buffer
 
-    # Warmup - fill the buffer
-    for _ in range(n_warmup):
-        with torch.no_grad():
-            _ = model.predict(sample)
+    n_samples = len(X)
+    predictions = []
 
-    # Measure
     start = time.perf_counter()
-    for _ in range(n_runs):
+    for i in range(n_samples):
         with torch.no_grad():
-            _ = model.predict(sample)
-    elapsed_ms = (time.perf_counter() - start) / n_runs * 1000
+            pred = model.predict(X[i])
+            predictions.append(pred)
+    elapsed_ms = (time.perf_counter() - start) / n_samples * 1000
 
-    return elapsed_ms
+    # Calculate balanced accuracy if labels provided
+    bal_acc = None
+    if y is not None:
+        bal_acc = balanced_accuracy_score(y, predictions)
+
+    return elapsed_ms, bal_acc
 
 
 def get_system_info() -> str:
@@ -155,21 +171,38 @@ def main():
     old_val_acc = old_ckpt.get("val_bal_acc", 0.0)
     new_val_acc = new_ckpt.get("val_bal_acc", 0.0)
 
-    # Load sample for latency test
+    # Load data for latency and accuracy test
+    y = None
     if data_path.exists() and any(data_path.glob("*.parquet")):
         rprint("[cyan]Loading validation data...[/]")
-        val_features, _ = load_raw_data(data_path, step="validation")
-        sample = val_features.values[0]
+        val_features, val_labels = load_raw_data(data_path, step="validation")
+        X = val_features.values
+        y = val_labels["label"].values
+        n_samples = len(X)
+        rprint(f"[dim]Running on {n_samples} samples for latency + accuracy measurement[/]")
     else:
-        rprint("[yellow]Data not found, using synthetic sample for latency test...[/]")
+        rprint("[yellow]Data not found, using synthetic samples for latency test...[/]")
         rprint("[dim]Run 'python -c \"from brainstorm.download import download_train_validation_data; download_train_validation_data()\"' to download real data[/]")
-        # Generate synthetic sample matching expected input shape (1024 channels)
-        sample = np.random.randn(1024).astype(np.float32)
+        rprint("[dim]Accuracy will use checkpoint values (no labels available)[/]")
+        # Generate synthetic samples matching expected input shape (1024 channels)
+        n_samples = 5000
+        X = np.random.randn(n_samples, 1024).astype(np.float32)
+        rprint(f"[dim]Running on {n_samples} synthetic samples[/]")
 
-    # Measure latency
-    rprint("[cyan]Measuring inference latency (200 runs each)...[/]\n")
-    old_latency = measure_latency(old_model, sample)
-    new_latency = measure_latency(new_model, sample)
+    # Measure latency and accuracy on full dataset
+    rprint(f"[cyan]Measuring OLD model ({n_samples} samples)...[/]")
+    old_latency, old_measured_acc = measure_latency_and_accuracy(old_model, X, y)
+    rprint(f"[cyan]Measuring NEW model ({n_samples} samples)...[/]\n")
+    new_latency, new_measured_acc = measure_latency_and_accuracy(new_model, X, y)
+
+    # Use measured accuracy if available, otherwise fall back to checkpoint values
+    if old_measured_acc is not None:
+        old_val_acc = old_measured_acc
+        rprint(f"[dim]OLD model measured accuracy: {old_val_acc:.4f}[/]")
+    if new_measured_acc is not None:
+        new_val_acc = new_measured_acc
+        rprint(f"[dim]NEW model measured accuracy: {new_val_acc:.4f}[/]")
+    print()
 
     # Calculate scores
     old_acc_score = accuracy_score(old_val_acc)
