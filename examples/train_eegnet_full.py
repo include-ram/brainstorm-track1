@@ -30,11 +30,12 @@ from brainstorm.ml.eegnet import EEGNet
 DATA_PATH = Path("./data")
 
 # Best EEGNet configuration from validation experiments
+# D=1 achieves similar accuracy with smaller model size
 BEST_CONFIG = {
     "projected_channels": 32,
     "window_size": 1600,
     "F1": 8,
-    "D": 2,
+    "D": 1,
     "dropout": 0.25,
 }
 
