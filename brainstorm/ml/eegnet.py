@@ -463,6 +463,26 @@ class EEGNet(BaseModel):
         logger.info(f"Training complete. Final loss: {avg_loss:.4f}")
         if best_val_acc > 0:
             logger.info(f"Best model saved to {best_checkpoint_path} with Val Balanced Acc: {best_val_acc:.4f}")
+        else:
+            # No validation data provided - save final model as checkpoint
+            checkpoint = {
+                "config": {
+                    "input_size": self.input_size,
+                    "projected_channels": self.projected_channels,
+                    "window_size": self.window_size,
+                    "n_classes": self._n_classes,
+                    "F1": self.F1,
+                    "D": self.D,
+                    "dropout": self.dropout_rate,
+                },
+                "classes": self.classes_,
+                "pca_mean": self.pca.mean_,
+                "pca_components": self.pca.components_,
+                "eegnet_state_dict": self.eegnet.state_dict(),
+                "epoch": epochs,
+            }
+            torch.save(checkpoint, best_checkpoint_path)
+            logger.info(f"Final model saved to {best_checkpoint_path} (no validation - trained for {epochs} epochs)")
 
     def _create_windowed_data(
         self, X: np.ndarray, y: np.ndarray
