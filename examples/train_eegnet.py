@@ -35,7 +35,7 @@ DATA_PATH = Path("./data")
 
 # EEGNet parameters (defaults)
 DEFAULT_PROJECTED_CHANNELS = 64  # Number of channels after PCA
-DEFAULT_WINDOW_SIZE = 128  # Temporal context window (128ms at 1000Hz)
+DEFAULT_WINDOW_SIZE = 1600  # Temporal context window (1600ms at 1000Hz)
 DEFAULT_F1 = 8  # Number of temporal filters
 DEFAULT_D = 2  # Depthwise multiplier
 DEFAULT_DROPOUT = 0.25
