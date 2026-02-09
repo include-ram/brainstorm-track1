@@ -11,6 +11,7 @@ Usage:
 The trained model is saved to model.pt and metadata to model_metadata.json.
 """
 
+import argparse
 from pathlib import Path
 from rich import print as rprint
 from rich.console import Console
@@ -28,13 +29,36 @@ PROJECTED_CHANNELS = 64  # After PCA reduction from 1024
 EMA_NODES = 32           # Number of EMA nodes
 WINDOW_SIZE = 1600        # 1600ms at 1000Hz sampling rate
 TEMPERATURE = 1.0        # Initial Gumbel-Softmax temperature
-EPOCHS = 1
+EPOCHS = 30
 BATCH_SIZE = 64
 LEARNING_RATE = 1e-3
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train EMA Network for BCI classification")
+    
+    # Model architecture
+    parser.add_argument("--projected-channels", type=int, default=PROJECTED_CHANNELS,
+                        help=f"Number of channels after PCA projection (default: {PROJECTED_CHANNELS})")
+    parser.add_argument("--ema-nodes", type=int, default=EMA_NODES,
+                        help=f"Number of EMA nodes (default: {EMA_NODES})")
+    parser.add_argument("--window-size", type=int, default=WINDOW_SIZE,
+                        help=f"Temporal context window in samples (default: {WINDOW_SIZE})")
+    parser.add_argument("--temperature", type=float, default=TEMPERATURE,
+                        help=f"Initial Gumbel-Softmax temperature (default: {TEMPERATURE})")
 
+    # Training parameters
+    parser.add_argument("--epochs", type=int, default=EPOCHS,
+                        help=f"Number of training epochs (default: {EPOCHS})")
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE,
+                        help=f"Batch size (default: {BATCH_SIZE})")
+    parser.add_argument("--learning-rate", type=float, default=LEARNING_RATE,
+                        help=f"Learning rate (default: {LEARNING_RATE})")
+
+    return parser.parse_args()
 def main() -> None:
     """Train and evaluate EMA Network."""
+    args = parse_args()
+
     rprint("\n[bold cyan]EMA Network Training for BCI Classification[/]\n")
 
     # Download data if not already present

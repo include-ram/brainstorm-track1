@@ -229,12 +229,12 @@ class EEGNet(BaseModel):
         )
 
     def _init_window_buffer(self) -> None:
-        """Initialize the sliding window buffer."""
+        """Initialize the sliding window buffer for streaming inference."""
         self._window_buffer = np.zeros(
             (self.window_size, self.projected_channels), dtype=np.float32
         )
 
-    def _update_buffer(self, projected_sample: np.ndarray) -> np.ndarray:
+    def _update_window_buffer(self, projected_sample: np.ndarray) -> np.ndarray:
         """
         Update sliding window buffer with new sample.
 
@@ -304,7 +304,7 @@ class EEGNet(BaseModel):
 
         # Fit PCA on training data
         self.pca = PCAProjection(n_components=self.projected_channels)
-        X_projected = self.pca.fit_transform(X)
+        X_projected = self.pca.fit_transform(X) # (n_samples, projected_channels)
         self.pca_layer = self.pca.get_torch_projection()
 
         # Build EEGNet
@@ -312,25 +312,25 @@ class EEGNet(BaseModel):
 
         # Create windowed samples for training
         logger.info(f"Creating windowed training data with window_size={self.window_size}")
-        X_windows, y_windows = self._create_windowed_data(X_projected, y)
+        X_windows, y_windows = self._create_windowed_data(X_projected, y) 
 
         logger.info(f"Training data: {X_windows.shape[0]} windows")
 
         # Convert to tensors
-        X_tensor = torch.tensor(X_windows, dtype=torch.float32)
-        # Reshape to (batch, 1, channels, time)
-        X_tensor = X_tensor.permute(0, 2, 1).unsqueeze(1)
+        X_tensor = torch.tensor(X_windows, dtype=torch.float32) # (n_windows, window_size, projected_channels)
+        # Reshape to (batch, 1, channels, time) because the first block of the EEGNet is the temporal convolution
+        X_tensor = X_tensor.permute(0, 2, 1).unsqueeze(1) # (n_windows, 1, projected_channels, window_size)
 
-        y_indices = np.array([class_to_idx[label] for label in y_windows])
-        y_tensor = torch.tensor(y_indices, dtype=torch.long)
+        y_indices = np.array([class_to_idx[label] for label in y_windows]) 
+        y_tensor = torch.tensor(y_indices, dtype=torch.long) # (n_windows,)
 
-        # Create data loader
+        # Create data loader - dataset contains (X_tensor, y_tensor) pairs
         dataset = torch.utils.data.TensorDataset(X_tensor, y_tensor)
         loader = torch.utils.data.DataLoader(
             dataset, batch_size=batch_size, shuffle=True, num_workers=0
         )
 
-        # Prepare validation data if provided
+        # Prepare validation data if provided in the same way as the training data
         val_loader = None
         if X_val is not None and y_val is not None:
             logger.info("Preparing validation data...")
@@ -338,10 +338,10 @@ class EEGNet(BaseModel):
             X_val_windows, y_val_windows = self._create_windowed_data(X_val_projected, y_val)
             logger.info(f"Validation data: {X_val_windows.shape[0]} windows")
 
-            X_val_tensor = torch.tensor(X_val_windows, dtype=torch.float32)
-            X_val_tensor = X_val_tensor.permute(0, 2, 1).unsqueeze(1)
+            X_val_tensor = torch.tensor(X_val_windows, dtype=torch.float32) # (n_windows, window_size, projected_channels)
+            X_val_tensor = X_val_tensor.permute(0, 2, 1).unsqueeze(1) # (n_windows, 1, projected_channels, window_size)
             y_val_indices = np.array([class_to_idx[label] for label in y_val_windows])
-            y_val_tensor = torch.tensor(y_val_indices, dtype=torch.long)
+            y_val_tensor = torch.tensor(y_val_indices, dtype=torch.long) # (n_windows,)
 
             val_dataset = torch.utils.data.TensorDataset(X_val_tensor, y_val_tensor)
             val_loader = torch.utils.data.DataLoader(
@@ -382,6 +382,7 @@ class EEGNet(BaseModel):
         avg_loss = 0.0
 
         for epoch in range(epochs):
+            self.train()
             total_loss = 0.0
             n_batches = 0
 
@@ -530,7 +531,7 @@ class EEGNet(BaseModel):
             x_projected = self.pca_layer(x_tensor).squeeze(0).numpy()
 
             # Update sliding window buffer
-            window = self._update_buffer(x_projected)
+            window = self._update_window_buffer(x_projected)
 
             # Prepare for network: (1, 1, channels, time)
             window_tensor = torch.tensor(window, dtype=torch.float32)

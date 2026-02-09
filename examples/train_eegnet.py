@@ -34,40 +34,40 @@ from brainstorm.ml.eegnet import EEGNet
 DATA_PATH = Path("./data")
 
 # EEGNet parameters (defaults)
-DEFAULT_PROJECTED_CHANNELS = 64  # Number of channels after PCA
-DEFAULT_WINDOW_SIZE = 1600  # Temporal context window (1600ms at 1000Hz)
-DEFAULT_F1 = 8  # Number of temporal filters
-DEFAULT_D = 2  # Depthwise multiplier
-DEFAULT_DROPOUT = 0.25
+PROJECTED_CHANNELS = 64  # Number of channels after PCA
+WINDOW_SIZE = 1600  # Temporal context window (1600ms at 1000Hz)
+F1 = 8  # Number of temporal filters
+D = 2  # Depthwise multiplier
+DROPOUT = 0.25
 
 # Training parameters (defaults)
-DEFAULT_EPOCHS = 30
-DEFAULT_BATCH_SIZE = 64
-DEFAULT_LEARNING_RATE = 1e-3
+EPOCHS = 30
+BATCH_SIZE = 64
+LEARNING_RATE = 1e-3
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train EEGNet model for ECoG classification")
 
     # Model architecture
-    parser.add_argument("--projected-channels", type=int, default=DEFAULT_PROJECTED_CHANNELS,
-                        help=f"Number of channels after PCA projection (default: {DEFAULT_PROJECTED_CHANNELS})")
-    parser.add_argument("--window-size", type=int, default=DEFAULT_WINDOW_SIZE,
-                        help=f"Temporal context window in samples (default: {DEFAULT_WINDOW_SIZE})")
-    parser.add_argument("--F1", type=int, default=DEFAULT_F1,
-                        help=f"Number of temporal filters (default: {DEFAULT_F1})")
-    parser.add_argument("--D", type=int, default=DEFAULT_D,
-                        help=f"Depthwise multiplier (default: {DEFAULT_D})")
-    parser.add_argument("--dropout", type=float, default=DEFAULT_DROPOUT,
-                        help=f"Dropout rate (default: {DEFAULT_DROPOUT})")
+    parser.add_argument("--projected-channels", type=int, default=PROJECTED_CHANNELS,
+                        help=f"Number of channels after PCA projection (default: {PROJECTED_CHANNELS})")
+    parser.add_argument("--window-size", type=int, default=WINDOW_SIZE,
+                        help=f"Temporal context window in samples (default: {WINDOW_SIZE})")
+    parser.add_argument("--F1", type=int, default=F1,
+                        help=f"Number of temporal filters (default: {F1})")
+    parser.add_argument("--D", type=int, default=D,
+                        help=f"Depthwise multiplier (default: {D})")
+    parser.add_argument("--dropout", type=float, default=DROPOUT,
+                        help=f"Dropout rate (default: {DROPOUT})")
 
     # Training parameters
-    parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS,
-                        help=f"Number of training epochs (default: {DEFAULT_EPOCHS})")
-    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE,
-                        help=f"Batch size (default: {DEFAULT_BATCH_SIZE})")
-    parser.add_argument("--learning-rate", type=float, default=DEFAULT_LEARNING_RATE,
-                        help=f"Learning rate (default: {DEFAULT_LEARNING_RATE})")
+    parser.add_argument("--epochs", type=int, default=EPOCHS,
+                        help=f"Number of training epochs (default: {EPOCHS})")
+    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE,
+                        help=f"Batch size (default: {BATCH_SIZE})")
+    parser.add_argument("--learning-rate", type=float, default=LEARNING_RATE,
+                        help=f"Learning rate (default: {LEARNING_RATE})")
 
     return parser.parse_args()
 

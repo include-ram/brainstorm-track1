@@ -39,7 +39,7 @@ class EMALayer(nn.Module):
     - h[k] = EMA state for channel k
     - alpha[k] = learnable weight between 0 and 1 (via sigmoid(theta[k]))
     - selected_input[k] = input channel chosen by Gumbel-Softmax sampling
-    - Channel selection depends on both current input and previous state (h[k](t-1))
+    - Channel selection depends only on the current input (not on state)
     """
 
     def __init__(
@@ -72,11 +72,12 @@ class EMALayer(nn.Module):
         # These control the balance between current input and previous state
         self.thetas = nn.Parameter(torch.zeros(self.ema_nodes))
 
-        # Input selection logits (function of input + state)
-        # Takes concatenated input and previous state
-        # Outputs logits for channel selection for each EMA node
+        # Input selection logits (function of input only)
+        # Takes current input and outputs logits for channel selection
+        # for each EMA node. This allows each EMA node to learn
+        # which input channels are most relevant.
         self.input_logits = nn.Linear(
-            self.input_dim + self.ema_nodes,
+            self.input_dim,
             self.ema_nodes * self.input_dim
         )
 
@@ -133,9 +134,8 @@ class EMALayer(nn.Module):
             # Normalize input at current timestep
             norm_x_t = self.layer_norm_input(x[:, t])  # (B, input_dim)
 
-            # Channel selection depends on input + state (adaptive mixing)
-            concat = torch.cat((norm_x_t, h_prev), dim=-1)
-            logits = self.input_logits(concat).view(-1, self.ema_nodes, self.input_dim)
+            # Channel selection depends on input only
+            logits = self.input_logits(norm_x_t).view(-1, self.ema_nodes, self.input_dim)
             input_mask = self.sample_gumbel_softmax(logits)  # (B, ema_nodes, input_dim)
 
             # Select input channels via mask
@@ -234,48 +234,41 @@ class QSimeonEMANet(BaseModel):
             temperature=self.temperature,
         )
 
-    def _init_buffers(self) -> None:
-        """Initialize state and window buffer for streaming inference."""
+    def _init_window_buffer(self) -> None:
+        """Initialize the sliding window buffer for streaming inference."""
         self._window_buffer = np.zeros(
             (self.window_size, self.projected_channels),
             dtype=np.float32
         )
 
-    def _create_windowed_data(
-        self, X: np.ndarray, y: np.ndarray
-    ) -> tuple[np.ndarray, np.ndarray]:
+    def _update_window_buffer(self, projected_sample: np.ndarray) -> np.ndarray:
         """
-        Create overlapping windows from sequential data for training.
-
-        Each window covers `window_size` consecutive samples.
-        Label is assigned as the last sample's label in each window.
+        Update sliding window buffer with new sample.
 
         Args:
-            X: Projected features of shape (n_samples, projected_channels)
-            y: Labels of shape (n_samples,)
+            projected_sample: New sample of shape (projected_channels,).
 
         Returns:
-            Tuple of (windowed_X, windowed_y):
-            - windowed_X: shape (n_windows, window_size, projected_channels)
-            - windowed_y: shape (n_windows,) - label of last sample in window
+            Current window of shape (window_size, projected_channels).
         """
-        windows = []
-        labels = []
+        if self._window_buffer is None:
+            self._init_window_buffer()
 
-        for i in range(self.window_size, len(X)):
-            window = X[i - self.window_size:i]
-            windows.append(window)
-            labels.append(y[i - 1])
+        # Shift buffer and add new sample
+        self._window_buffer = np.roll(self._window_buffer, -1, axis=0)
+        self._window_buffer[-1] = projected_sample
 
-        return np.array(windows), np.array(labels)
+        return self._window_buffer.copy()
+
 
     def fit_model(
         self,
         X: np.ndarray,
         y: np.ndarray,
-        epochs: int = 50,
-        batch_size: int = 16,
+        epochs: int = 30,
+        batch_size: int = 64,
         learning_rate: float = 1e-3,
+        verbose: bool = True,
         X_val: np.ndarray | None = None,
         y_val: np.ndarray | None = None,
         **kwargs
@@ -309,7 +302,7 @@ class QSimeonEMANet(BaseModel):
 
         # Fit PCA on training data
         self.pca = PCAProjection(n_components=self.projected_channels)
-        X_proj = self.pca.fit_transform(X)
+        X_proj = self.pca.fit_transform(X) # (n_samples, projected_channels)
         self.pca_layer = self.pca.get_torch_projection()
 
         # Build network
@@ -317,19 +310,35 @@ class QSimeonEMANet(BaseModel):
 
         # Create windowed data for temporal learning
         logger.info(f"Creating windowed data (window_size={self.window_size})")
-        X_windows, y_windows = self._create_windowed_data(X_proj, y)
+        X_windows, y_windows = self._create_windowed_data(X_proj, y) 
         logger.info(f"Created {len(X_windows)} training windows")
 
         # Convert to tensors
-        X_tensor = torch.tensor(X_windows, dtype=torch.float32)
-        y_indices = np.array([class_to_idx[label] for label in y_windows])
-        y_tensor = torch.tensor(y_indices, dtype=torch.long)
+        X_tensor = torch.tensor(X_windows, dtype=torch.float32) # (n_windows, window_size, projected_channels)
+        y_indices = np.array([class_to_idx[label] for label in y_windows]) 
+        y_tensor = torch.tensor(y_indices, dtype=torch.long) # (n_windows,)
 
-        # Create data loader
+        # Create data loader - dataset contains (X_tensor, y_tensor) pairs
         dataset = torch.utils.data.TensorDataset(X_tensor, y_tensor)
         loader = torch.utils.data.DataLoader(
             dataset, batch_size=batch_size, shuffle=True
         )
+
+        # Prepare validation data if provided in the same way as the training data
+        val_loader = None
+        if X_val is not None and y_val is not None:
+            X_val_projected = self.pca.transform(X_val)
+            X_val_windows, y_val_windows = self._create_windowed_data(X_val_projected, y_val)
+            logger.info(f"Validation data: {len(X_val_windows)} windows")
+            
+            X_val_tensor = torch.tensor(X_val_windows, dtype=torch.float32) # (n_windows, window_size, projected_channels)
+            y_val_indices = np.array([class_to_idx[label] for label in y_val_windows]) 
+            y_val_tensor = torch.tensor(y_val_indices, dtype=torch.long) # (n_windows,)
+
+            val_dataset = torch.utils.data.TensorDataset(X_val_tensor, y_val_tensor)
+            val_loader = torch.utils.data.DataLoader(
+                val_dataset, batch_size=batch_size, shuffle=False, num_workers=0
+            )
 
         # Setup device - prioritize CUDA (cluster GPU) > MPS (Apple Silicon) > CPU
         if torch.cuda.is_available():
@@ -360,10 +369,20 @@ class QSimeonEMANet(BaseModel):
         # Training loop
         for epoch in range(epochs):
             self.train()
-            total_loss = 0
+            total_loss = 0.0
+            n_batches = 0
 
-            for X_batch, y_batch in tqdm(loader, desc=f"Epoch {epoch+1}/{epochs}"):
+            # Progress bar for batches within epoch
+            batch_iterator = tqdm(
+                loader,
+                desc=f"Epoch {epoch+1}/{epochs}",
+                disable=not verbose,
+                leave=True,
+            )
+
+            for X_batch, y_batch in batch_iterator:
                 X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+                # Shape: (batch_size, window_size, projected_channels), (batch_size,)
 
                 optimizer.zero_grad()
 
@@ -403,8 +422,37 @@ class QSimeonEMANet(BaseModel):
         # Move to CPU and initialize buffers for inference
         self.to("cpu")
         self.eval()
-        self._init_buffers()
+        self._init_window_buffer()
         logger.info("Training complete")
+
+
+    def _create_windowed_data(
+        self, X: np.ndarray, y: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Create overlapping windows from sequential data for training.
+
+        Each window covers `window_size` consecutive samples.
+        Label is assigned as the last sample's label in each window.
+
+        Args:
+            X: Projected features of shape (n_samples, projected_channels)
+            y: Labels of shape (n_samples,)
+
+        Returns:
+            Tuple of (windowed_X, windowed_y):
+            - windowed_X: shape (n_windows, window_size, projected_channels)
+            - windowed_y: shape (n_windows,) - label of last sample in window
+        """
+        windows = []
+        labels = []
+
+        for i in range(self.window_size, len(X)):
+            window = X[i - self.window_size:i]
+            windows.append(window)
+            labels.append(y[i - 1])
+
+        return np.array(windows), np.array(labels)
 
     def _evaluate(
         self,
@@ -487,18 +535,19 @@ class QSimeonEMANet(BaseModel):
         with torch.no_grad():
             # Project input channels
             x_tensor = torch.tensor(X, dtype=torch.float32).unsqueeze(0)
-            x_proj = self.pca_layer(x_tensor).squeeze(0).numpy()
+            x_projected = self.pca_layer(x_tensor).squeeze(0).numpy()
 
             # Update sliding window buffer
-            self._window_buffer = np.roll(self._window_buffer, -1, axis=0)
-            self._window_buffer[-1] = x_proj
+            window = self._update_window_buffer(x_projected)
 
             # Process window through EMA layer
-            window = torch.tensor(self._window_buffer, dtype=torch.float32).unsqueeze(0)
-            outputs = self.ema_layer(window)  # (1, window_size, n_classes)
-            logits = outputs[0, -1, :]  # Last timestep
+            window_tensor = torch.tensor(window, dtype=torch.float32).unsqueeze(0)
+            outputs = self.forward(window_tensor)  # (1, window_size, n_classes)
 
-            predicted_idx = int(torch.argmax(logits).item())
+            # Get prediction
+            logits = outputs[0, -1, :]  # Last timestep: (n_classes,)
+
+            predicted_idx = int(torch.argmax(logits, dim=1).item())
 
         return int(self.classes_[predicted_idx])
 
@@ -573,7 +622,7 @@ class QSimeonEMANet(BaseModel):
         model.eval()
 
         # Initialize inference buffers
-        model._init_buffers()
+        model._init_window_buffer()
 
         logger.debug(f"QSimeonEMANet model loaded from {MODEL_PATH}")
         return model
